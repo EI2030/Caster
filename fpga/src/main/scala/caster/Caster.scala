@@ -44,7 +44,6 @@ object Caster {
         useLock = false,
         useRegion = false,
         useBurst = false,
-        useLock = false,
         useQos = false,
         useResp = false
     )
@@ -53,7 +52,7 @@ object Caster {
         addressWidth = 32,
         dataWidth = 32,
         selWidth = 1,
-        useSlaveError = true
+        useSlaveError = false
     )
 
     def getFetcherConfig(config: CasterConfig, clock: ClockDomain) = FetcherGenerics(
@@ -62,8 +61,17 @@ object Caster {
         burstLength = config.burstBytes,
         frameSizeMax = 2560 * 2560,
         fifoSize = config.burstBytes * 4,
-        pixelWidth = 8,
+        pixelWidth = 32, // 8x 4bit pixels
         pixelClock = clock
+    )
+
+    def getWaveformConfig(config: CasterConfig) = WaveformGenerics(
+        waveformSize = 4096,
+        lookupWidth = 8,
+        pixelWidth = 4,
+        maxFrame = 64,
+        bramLatency = 2,
+        apbConfig = getApbConfig(config)
     )
 }
 
@@ -83,45 +91,46 @@ class Caster(config: CasterConfig) extends Component {
 
     val pixelClockDomain = ClockDomain.external("pixel")
 
+    val fetcherControl = FetcherControl(
+            Caster.getFetcherConfig(config, pixelClockDomain),
+            Caster.getWaveformConfig(config),
+            Caster.getAxiConfig(config),
+            Caster.getApbConfig(config))
+
     val gpioCtrl = Apb3Gpio(
         gpioWidth = 32,
         withReadSync = true
     )
 
-    val miscRegApb = slave(Apb3(Caster.getApbConfig(config)))
-    val miscRegApbCtrl = Apb3SlaveFactory(miscRegApb)
+    val apb3cc = Apb3CC(
+        config = Caster.getApbConfig(config),
+        inputClock = ClockDomain.current,
+        outputClock = pixelClockDomain
+    )
 
     val apbDecoder = Apb3Decoder(
         master = io.apb,
         slaves = List(
-            miscRegApb.io.apb -> (0xff000000L, 4 KiB)
-            gpioCtrl.io.apb -> (0xff001000L, 4 KiB)
+            fetcherControl.io.apb -> (0xff000000L, 4 KiB),
+            gpioCtrl.io.apb -> (0xff001000L, 4 KiB),
+            apb3cc.io.input -> (0xff002000L, 4 KiB)
         )
     )
 
-    val fetcherA = Fetcher(Caster.getFetcherConfig(config, pixelClockDomain))
-    val fetcherB = Fetcher(Caster.getFetcherConfig(config, pixelClockDomain))
-
-    miscRegApbCtrl.drive(fetcherA.io.base, 0x00, 32)
-    miscRegApbCtrl.drive(fetcherA.io.size, 0x04, 32)
-    miscRegApbCtrl.drive(fetcherB.io.base, 0x08, 32)
-    miscRegApbCtrl.drive(fetcherB.io.size, 0x0c, 32)
-
     val pixelClockArea = new ClockingArea(pixelClockDomain) {
-        fetcherA.io.trigger := False
-        fetcherA.io.pixel.ready := True
-        fetcherB.io.trigger := False
-        fetcherB.io.pixel.ready := True
+        fetcherControl.io.trigger := False
+        
+        val waveform = Waveform(
+            Caster.getWaveformConfig(config)
+        )
+
+        waveform.io.apb <> apb3cc.io.output
+        waveform.io.sourceLevel <> fetcherControl.io.sourceLevel
+        waveform.io.targetLevel <> fetcherControl.io.targetLevel
+        waveform.io.frameSeq := U(0)
+        waveform.io.pixelDrive.ready := True
     }
 
-    val axiArbiter = Axi4ReadOnlyArbiter(
-        outputConfig = Caster.getAxiConfig(config),
-        inputsCount = 2
-    )
-
-    io.axi <> axiArbiter.io.output
-    axiArbiter.io.inputs(0) << fetcherA.io.axi
-    axiArbiter.io.inputs(1) << fetcherB.io.axi
-
     io.gpio <> gpioCtrl.io.gpio
+    io.axi <> fetcherControl.io.axi
 }

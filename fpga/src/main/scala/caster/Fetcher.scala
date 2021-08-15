@@ -46,10 +46,10 @@ case class FetcherGenerics(
     def bytePerAddress = axiDataWidth/8 * burstLength
 }
 
-case class Fetcher(g: FetcherGenerics) extends Component{
+case class Fetcher(g: FetcherGenerics) extends Component {
     import g._
     
-    val io = new Bundle{
+    val io = new Bundle {
         val axi = master(Axi4ReadOnly(axi4Config))
         val base = in UInt(dmaGenerics.addressWidth bits)
         val size = in UInt(dmaGenerics.sizeWidth bits)
